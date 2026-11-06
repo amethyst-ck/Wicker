@@ -502,10 +502,22 @@ class TestSyncPlanReport:
         self._upgrade(tmp_path, old, new).print_sync_plan()
         out = capsys.readouterr().out
         assert "re-sync extension  ReceiptScanner" in out
-        assert "rebuild image      web" in out
+        assert "rebuild image      web (instance re-pointed at it)" in out
         assert "re-sync settings   config/settings/S.php" in out
         assert "re-declare sidecar receipt-scanner (new)" in out
         assert "restart instance" in out
+
+    def test_build_from_web_image_is_rebuilt_by_canasta(self, tmp_path, capsys):
+        old = minimal_manifest(version="1.0.0")
+        new = minimal_manifest(
+            version="2.0.0", images={"web": {"context": "./images/web"}})
+        up = self._upgrade(tmp_path, old, new)
+        up.web_build_from = True
+        up.print_sync_plan()
+        out = capsys.readouterr().out
+        assert ("rebuild image      web (by Canasta, from the --build-from "
+                "tree)" in out)
+        assert "re-pointed" not in out
 
     def test_lists_removed_components_and_kept_wikis(self, tmp_path, capsys):
         old = minimal_manifest(

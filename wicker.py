@@ -2425,7 +2425,10 @@ class Upgrade(Deploy):
         info(f"Code/config sync plan "
              f"({self.old_version} -> {self.m['version']}):")
         for svc in sorted(self.m.get("images") or {}):
-            print(f"  rebuild image      {svc} (instance re-pointed at it)")
+            how = ("by Canasta, from the --build-from tree"
+                   if svc == "web" and self.web_build_from
+                   else "instance re-pointed at it")
+            print(f"  rebuild image      {svc} ({how})")
         for section in ("extensions", "skins"):
             kind = section[:-1]
             for n in sorted(_custom_component_names(self.m, section)):
