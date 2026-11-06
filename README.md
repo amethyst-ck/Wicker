@@ -214,6 +214,25 @@ would run, and writes nothing — run it first. Migration steps are
 idempotent (a rename already applied finds nothing to do), so an
 interrupted upgrade can simply be re-run.
 
+## Upgrading Wicker
+
+Wicker runs straight from its git checkout, so upgrading it means
+moving the checkout to a newer release tag:
+
+```bash
+git -C ~/src/Wicker fetch --tags
+git -C ~/src/Wicker checkout vX.Y.Z
+git -C ~/src/Wicker describe --tags   # the release in use
+```
+
+A checkout that tracks `main` can use `git pull --ff-only` instead.
+If the release changes `requirements.txt`, re-run
+`.venv/bin/pip install -r requirements.txt` in the checkout.
+
+A new Wicker release changes nothing in deployed instances by itself.
+It takes effect the next time `wicker deploy` or `wicker upgrade` runs,
+and `wicker upgrade` runs only when the app's version goes up.
+
 ## Multiple applications on one host or cluster
 
 Wicker is one instance per application, but a single Docker Compose
