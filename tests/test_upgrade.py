@@ -173,7 +173,7 @@ class TestPreflight:
             up.preflight_upgrade()
 
     def test_no_state_no_baseline(self, tmp_path):
-        (tmp_path / "t").mkdir()  # instance dir exists, no .wicker-app
+        (tmp_path / "t").mkdir()  # instance dir exists, no recorded state
         with pytest.raises(wicker.BuildError, match="--baseline"):
             _v2_upgrade(tmp_path).preflight_upgrade()
 
@@ -183,6 +183,15 @@ class TestPreflight:
         up.preflight_upgrade()
         assert up.old_version == "1.0.0"
         assert up.old_manifest["version"] == "1.0.0"
+        assert up.base_pages["Help:Old"] == "obsolete\n"
+
+    def test_legacy_state_dir_read(self, tmp_path):
+        _deployed_v1(tmp_path)
+        inst = tmp_path / "t"
+        (inst / "config" / "wicker-app").rename(inst / ".wicker-app")
+        up = _v2_upgrade(tmp_path)
+        up.preflight_upgrade()
+        assert up.old_version == "1.0.0"
         assert up.base_pages["Help:Old"] == "obsolete\n"
 
     def test_baseline_bootstrap(self, tmp_path):
@@ -809,3 +818,46 @@ class TestUpgradePipelineShape:
         for step in ("plan_content", "print_sync_plan", "print_report",
                      "print_migration_preview"):
             assert step in calls
+
+
+class TestMoveLegacyState:
+    def _legacy(self, tmp_path):
+        _deployed_v1(tmp_path)
+        inst = tmp_path / "t"
+        (inst / "config" / "wicker-app").rename(inst / ".wicker-app")
+        return inst
+
+    def test_moves_into_config(self, tmp_path):
+        inst = self._legacy(tmp_path)
+        up = _v2_upgrade(tmp_path, dry_run=False)
+        up.move_legacy_state()
+        assert not (inst / ".wicker-app").exists()
+        assert (inst / "config" / "wicker-app" / "state.json").is_file()
+        assert (inst / "config" / "wicker-app" / "content"
+                / "Help/Old.mediawiki").is_file()
+
+    def test_dry_run_moves_nothing(self, tmp_path, capsys):
+        inst = self._legacy(tmp_path)
+        _v2_upgrade(tmp_path, dry_run=True).move_legacy_state()
+        assert (inst / ".wicker-app" / "state.json").is_file()
+        assert not (inst / "config" / "wicker-app").exists()
+        assert "$ mv" in capsys.readouterr().out
+
+    def test_current_state_wins_over_legacy(self, tmp_path, capsys,
+                                            monkeypatch):
+        monkeypatch.setattr(wicker, "have", lambda t: True)
+        _deployed_v1(tmp_path)
+        inst = tmp_path / "t"
+        (inst / ".wicker-app").mkdir()
+        (inst / ".wicker-app" / "state.json").write_text("{}")
+        up = _v2_upgrade(tmp_path, dry_run=False)
+        up.move_legacy_state()
+        assert (inst / ".wicker-app" / "state.json").is_file()
+        assert "WARN" in capsys.readouterr().err
+        up.preflight_upgrade()
+        assert up.old_version == "1.0.0"
+
+    def test_no_legacy_is_a_no_op(self, tmp_path, capsys):
+        _deployed_v1(tmp_path)
+        _v2_upgrade(tmp_path, dry_run=False).move_legacy_state()
+        assert "Moving app state" not in capsys.readouterr().out

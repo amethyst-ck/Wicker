@@ -49,8 +49,12 @@ except ImportError:
 MANIFEST_NAME = "wicker.yaml"
 # Per-instance app state (version, manifest copy, imported-page snapshot),
 # written at the end of deploy. `wicker upgrade` reads it as the pristine/
-# merge base for shipped pages.
-STATE_DIR_NAME = ".wicker-app"
+# merge base for shipped pages. It lives under the instance's config/, which
+# `canasta backup` captures and gitops tracks.
+STATE_DIR = Path("config") / "wicker-app"
+# The older location, outside what backups capture. `wicker upgrade` reads
+# state found there and moves it to STATE_DIR.
+LEGACY_STATE_DIR_NAME = ".wicker-app"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema" / "wicker-app.v1.schema.json"
 SKELETON_PATH = Path(__file__).resolve().parent / "skeleton"
 
@@ -392,6 +396,10 @@ class Deploy:
     def rel(self, path: str) -> Path:
         """Resolve a manifest-relative path."""
         return (self.app_dir / path).resolve()
+
+    @property
+    def state_dir(self) -> Path:
+        return self.instance_dir / STATE_DIR
 
     def _locate_instance(self, args: argparse.Namespace) -> None:
         """Set parent_path and instance_dir as <parent>/<id>, with the
@@ -1296,15 +1304,15 @@ class Deploy:
     # ---- state --------------------------------------------------------- #
 
     def record_state(self, op: str = "deploy") -> None:
-        """Write the deployed app's state into <instance>/.wicker-app/:
+        """Write the deployed app's state into <instance>/config/wicker-app/:
         state.json (app, version, content hashes), a verbatim copy of the
         applied manifest, and a snapshot of every imported page file under
         content/ (keyed by derived filename, regardless of any per-page
         `file` override). `wicker upgrade` uses the snapshot as the
         pristine-test and merge base for shipped pages.
-        The instance dir travels with the instance and is captured by
-        `canasta backup`, so the state does too."""
-        state_dir = self.instance_dir / STATE_DIR_NAME
+        config/ is captured by `canasta backup`, so the state survives a
+        backup and restore."""
+        state_dir = self.state_dir
         info(f"Recording app state in {state_dir}")
         if self.dry_run:
             print(f"  $ write {state_dir}/{{state.json,manifest.yaml,content/}}")
@@ -1723,7 +1731,7 @@ class Upgrade(Deploy):
         self.skip_backup = getattr(args, "skip_backup", False)
         self.report_only = getattr(args, "report_only", False)
         self.baseline = getattr(args, "baseline", None)
-        # Set by preflight_upgrade (from .wicker-app/ state or --baseline).
+        # Set by preflight_upgrade (from recorded state or --baseline).
         self.old_app: str | None = None
         self.old_version: str | None = None
         self.old_manifest: dict = {}
@@ -1731,8 +1739,33 @@ class Upgrade(Deploy):
         self.migrations: list = []
 
     @property
-    def state_dir(self) -> Path:
-        return self.instance_dir / STATE_DIR_NAME
+    def legacy_state_dir(self) -> Path:
+        return self.instance_dir / LEGACY_STATE_DIR_NAME
+
+    def _readable_state_dir(self) -> Path:
+        """The state dir to read: the current location, else the legacy
+        one when only that holds state (not moved yet, or a dry run)."""
+        if not (self.state_dir / "state.json").is_file() \
+                and (self.legacy_state_dir / "state.json").is_file():
+            return self.legacy_state_dir
+        return self.state_dir
+
+    def move_legacy_state(self) -> None:
+        """Move state from the legacy .wicker-app/ into config/wicker-app/,
+        where backups capture it."""
+        legacy = self.legacy_state_dir
+        if not legacy.is_dir():
+            return
+        if self.state_dir.exists():
+            warn(f"both {self.state_dir} and {legacy} exist; using "
+                 f"{self.state_dir} — remove {legacy}")
+            return
+        info(f"Moving app state from {legacy} to {self.state_dir}")
+        if self.dry_run:
+            print(f"  $ mv {legacy} {self.state_dir}")
+            return
+        self.state_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(self.state_dir))
 
     # ---- instance location ---------------------------------------------- #
 
@@ -1838,23 +1871,24 @@ class Upgrade(Deploy):
 
     def _load_old_state(self) -> None:
         """Populate old_app/old_version/old_manifest/base_pages from the
-        instance's .wicker-app/ state, or from --baseline (a checkout of
+        instance's recorded state, or from --baseline (a checkout of
         the deployed app version) for instances that predate state
         recording."""
-        state_path = self.state_dir / "state.json"
+        state_dir = self._readable_state_dir()
+        state_path = state_dir / "state.json"
         if state_path.is_file():
             try:
                 state = json.loads(state_path.read_text())
             except json.JSONDecodeError as e:
                 raise BuildError(f"corrupt {state_path}: {e}")
-            manifest_copy = self.state_dir / "manifest.yaml"
+            manifest_copy = state_dir / "manifest.yaml"
             if not manifest_copy.is_file():
                 raise BuildError(f"missing {manifest_copy}")
             self.old_app = state.get("app")
             self.old_version = state.get("version")
             self.old_manifest = yaml.safe_load(manifest_copy.read_text())
             for title in state.get("pages", {}):
-                f = self.state_dir / "content" / self._page_filename(title)
+                f = state_dir / "content" / self._page_filename(title)
                 if f.is_file():
                     self.base_pages[title] = f.read_text()
                 else:
@@ -1893,6 +1927,7 @@ class Upgrade(Deploy):
                 self.print_migration_preview()
                 return
             self.backup()
+            self.move_legacy_state()
             images = self.build_images()
             self.apply_images(images)
             self.install_env()
