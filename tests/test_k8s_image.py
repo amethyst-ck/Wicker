@@ -36,6 +36,15 @@ class TestCanastaCreateImageFlags:
         assert "--build-from" in out
         assert "--canasta-image" not in out
 
+    @pytest.mark.parametrize("orchestrator", ["compose", "k8s"])
+    def test_create_records_the_app_version(self, tmp_path, capsys,
+                                            orchestrator):
+        d = _deploy(tmp_path, orchestrator,
+                    {"web": {"dockerfile": "./Dockerfile"}})
+        d.canasta_create(images={})
+        assert ("--build-arg WICKER_APP_VERSION=0.1.0"
+                in capsys.readouterr().out)
+
     def test_compose_deploy_does_not_build_web_itself(self, tmp_path, capsys):
         d = _deploy(tmp_path, "compose", {"web": {"dockerfile": "./Dockerfile"}})
         assert d.build_images() == {}
@@ -437,7 +446,8 @@ class TestUpgradeRebuildsFromBuildFrom:
         u.rebuild_web_image()
         assert (_build_from_root() / "Canasta" / "Dockerfile").is_file()
         assert calls == [["canasta", "image", "set-build-arg", "-i", "app",
-                          f"BASE_IMAGE={TEST_CANASTA_IMAGE}"]]
+                          f"BASE_IMAGE={TEST_CANASTA_IMAGE}",
+                          "WICKER_APP_VERSION=0.1.0"]]
 
     def test_rebuild_uses_the_manifest_base(
             self, tmp_path, monkeypatch, capsys, orchestrator):

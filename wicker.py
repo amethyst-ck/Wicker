@@ -86,6 +86,13 @@ ELASTICSEARCH_IMAGE_KEY = "CANASTA_ELASTICSEARCH_IMAGE"
 # Wicker delivers a web overlay through --build-from from this release on.
 MIN_CLI_FOR_BUILD_FROM = "4.27.0"
 
+# Build argument recording the app version a web overlay was built for.
+# `canasta image set-build-arg` rebuilds only when the recorded build args
+# change, so a new app version must change them even when BASE_IMAGE does
+# not. A Dockerfile may declare it (e.g. for a LABEL); Docker ignores it
+# otherwise.
+APP_VERSION_BUILD_ARG = "WICKER_APP_VERSION"
+
 # Pull-side address of Canasta's in-cluster image registry (a fixed
 # ClusterIP, part of the registry's contract): pods pull what
 # `canasta image push` pushed under this prefix.
@@ -735,7 +742,9 @@ class Deploy:
             # explicit base: the resolved one (CLI --base-image or manifest
             # baseImage), else the Canasta image for the targeted version.
             base = self._base_image_for("web", web) or default_canasta_image()
-            cmd += ["--build-arg", f"BASE_IMAGE={base}"]
+            cmd += ["--build-arg", f"BASE_IMAGE={base}",
+                    "--build-arg",
+                    f"{APP_VERSION_BUILD_ARG}={self.m['version']}"]
         elif self.base_image:
             # No web overlay: run the custom image directly. A k8s cluster
             # must be able to pull it, so a local-only tag is rejected there
@@ -2105,15 +2114,18 @@ class Upgrade(Deploy):
         this app version's context into the tree, then have the CLI rebuild
         from it with `canasta image set-build-arg`, under the image name the
         instance runs and `canasta upgrade` rebuilds. The CLI restarts the
-        instance when the image changed. With --skip-build the base is only
-        recorded, and the next `canasta upgrade` rebuilds."""
+        instance when the image changed. The app version is set too, so the
+        build args change, and the CLI rebuilds, on every new app version.
+        With --skip-build they are only recorded, and the next `canasta
+        upgrade` rebuilds."""
         web = (self.m.get("images", {}) or {}).get("web")
         if not (web and self.web_build_from):
             return
         self._stage_web_build_from(web)
         base = self._base_image_for("web", web) or default_canasta_image()
         cmd = ["canasta", "image", "set-build-arg", "-i", self.id,
-               f"BASE_IMAGE={base}"]
+               f"BASE_IMAGE={base}",
+               f"{APP_VERSION_BUILD_ARG}={self.m['version']}"]
         if self.skip_build:
             info("Skipping the web image rebuild (--skip-build); the next "
                  "`canasta upgrade` rebuilds it")
