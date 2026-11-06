@@ -67,7 +67,9 @@ Both images are delivered on both orchestrators. The `web` image rides
 (on Kubernetes it also pushes it to the in-cluster registry), and
 rebuilds it from the same tree on `canasta upgrade`. `wicker upgrade`
 restages that tree and has Canasta rebuild it, so the `tag` key does not
-apply to `web`. This needs canasta CLI 4.27.0 or later. The
+apply to `web`. Wicker also passes the app version as the
+`WICKER_APP_VERSION` build argument, which a Dockerfile may declare (for
+example for a `LABEL`). This needs canasta CLI 4.27.0 or later. The
 `elasticsearch` image is built locally on
 Compose and pushed via `canasta image push` on Kubernetes; either way,
 Wicker points the instance's `CANASTA_ELASTICSEARCH_IMAGE` at the
