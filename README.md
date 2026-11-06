@@ -27,7 +27,10 @@ Canasta instance (Docker Compose or Kubernetes) and installs the whole
 app onto it:
 
 1. Create the instance (`canasta create`), building and wiring in the
-   app's derived `web` and `elasticsearch` images if it has them.
+   app's derived `web` and `elasticsearch` images if it has them. The
+   `web` image is built by Canasta from a `--build-from` tree Wicker
+   stages under `~/.local/state/wicker/build-from/<id>/`, so `canasta
+   upgrade` rebuilds it on each new Canasta release.
 2. Apply instance `env` and deliver declared `secrets`
    (see [Secrets](#secrets)).
 3. Install the app's sidecars, custom extensions and skins, settings
@@ -134,7 +137,9 @@ Flags:
   fragments.
 - `--secret KEY=VALUE` (repeatable): a value for a declared secret; bare
   `--secret KEY` reads it from the environment.
-- `--skip-build`: reuse existing images.
+- `--skip-build`: reuse existing images. On upgrade, the `web` image's
+  new base is recorded without a rebuild, and the next `canasta upgrade`
+  rebuilds it.
 - `--base-image IMAGE`: deploy against a custom/unreleased Canasta image.
   With a web image overlay it is passed as the `BASE_IMAGE` build
   argument (see `images/README.md` in a scaffolded app); without one it
@@ -174,6 +179,9 @@ anything ambiguous is reported and left alone:
    out with `--skip-backup`; the backup repo must be initialized).
 3. **Code & config re-sync**: images rebuilt and re-delivered,
    env/secrets re-set, sidecars re-declared (dropped ones removed),
+   the `web` image rebuilt by Canasta from the restaged `--build-from`
+   tree (`canasta image set-build-arg`, which restarts onto it when it
+   changed),
    custom extensions/skins overwritten (dropped ones pruned), settings
    and public assets re-installed, new farm wikis added (dropped wikis
    are never deleted), then restart.

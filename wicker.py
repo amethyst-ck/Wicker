@@ -81,6 +81,11 @@ DEFAULT_CANASTA_IMAGE = "ghcr.io/canastawiki/canasta:latest"
 SUPPORTED_IMAGE_SERVICES = ("web", "elasticsearch")
 ELASTICSEARCH_IMAGE_KEY = "CANASTA_ELASTICSEARCH_IMAGE"
 
+# The first canasta CLI whose `canasta image set-build-arg` rebuilds a
+# --build-from instance's web image under a name of its own on Compose.
+# Wicker delivers a web overlay through --build-from from this release on.
+MIN_CLI_FOR_BUILD_FROM = "4.27.0"
+
 # Pull-side address of Canasta's in-cluster image registry (a fixed
 # ClusterIP, part of the registry's contract): pods pull what
 # `canasta image push` pushed under this prefix.
@@ -358,6 +363,11 @@ class Deploy:
         self.domain = self.wikis[0].get("url")
         self.dry_run = args.dry_run
         self.skip_build = args.skip_build
+        # Whether the web overlay is delivered through the CLI's --build-from
+        # (built from the tree _stage_web_build_from stages, under the CLI's
+        # own image name, and rebuilt by `canasta upgrade`). Always so for a
+        # new deploy; Upgrade decides per instance.
+        self.web_build_from = True
         # Deploy against a custom Canasta image. With a web overlay it is the
         # overlay's base (a BASE_IMAGE build-arg; also settable per-service via
         # images.<svc>.baseImage). Without an overlay it is the instance image
@@ -572,6 +582,7 @@ class Deploy:
         constraint = (self.m.get("requires") or {}).get("canasta")
         if constraint:
             check_canasta_requirement(constraint)
+        self.check_cli_for_build_from()
         self.validate_secrets()
         if self.dry_run:
             return
@@ -585,6 +596,24 @@ class Deploy:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if probe.returncode == 0:
                 raise BuildError(f"a container named '{self.container}' already exists")
+
+    def check_cli_for_build_from(self) -> None:
+        """Refuse a canasta CLI too old to deliver the web overlay through
+        --build-from (see MIN_CLI_FOR_BUILD_FROM)."""
+        if not ((self.m.get("images") or {}).get("web")
+                and self.web_build_from):
+            return
+        version = canasta_cli_version()
+        if version is None:
+            warn(f"cannot read the canasta CLI version from `canasta "
+                 f"version`; the web overlay needs canasta "
+                 f">= {MIN_CLI_FOR_BUILD_FROM}")
+            return
+        if semver_triplet(version) < semver_triplet(MIN_CLI_FOR_BUILD_FROM):
+            raise BuildError(
+                f"the web overlay needs canasta >= {MIN_CLI_FOR_BUILD_FROM}, "
+                f"but the installed CLI is {version} — upgrade the canasta "
+                f"CLI")
 
     def _base_image_for(self, service: str, spec: dict) -> str | None:
         """Resolved BASE_IMAGE build-arg for a service's image, or None.
@@ -601,10 +630,10 @@ class Deploy:
 
         Only the services Canasta can point at a custom image are accepted
         (SUPPORTED_IMAGE_SERVICES); anything else is skipped with a warning.
-        On k8s the `web` image is built and delivered by Canasta via
-        `canasta create --build-from` (which pushes it to the in-cluster
-        registry), so it is not built here; the elasticsearch image is
-        delivered via `canasta image push` and its entry carries the
+        The `web` image is built by Canasta from the --build-from tree
+        (canasta_create, Upgrade.rebuild_web_image), so it is not built here
+        unless the instance has no such tree. On k8s the elasticsearch image
+        is delivered via `canasta image push` and its entry carries the
         cluster-pullable ref."""
         built: dict = {}
         for service, spec in (self.m.get("images", {}) or {}).items():
@@ -613,11 +642,13 @@ class Deploy:
                      f"'web' and 'elasticsearch' only; run additional "
                      f"containers as sidecars — skipped")
                 continue
+            if service == "web" and self.web_build_from:
+                continue
             if self.is_k8s:
                 if service == "elasticsearch":
                     built[service] = self._push_image_k8s(service, spec)
-                # web is delivered by `canasta create --build-from` at
-                # deploy; upgrade pushes it via _push_image_k8s instead.
+                # A web image without a --build-from tree is pushed by
+                # Upgrade.apply_images.
                 continue
             tag = spec.get("tag") or self._derived_tag(service)
             if self.skip_build:
@@ -687,43 +718,37 @@ class Deploy:
             cmd += ["-t", site_name]
         if self.is_k8s:
             cmd += self.k8s_flags
-            # The web pod must pull from a registry the cluster can reach, so a
-            # locally built --canasta-image tag is useless here. Hand the web
-            # image's build context to `canasta create --build-from`, which
-            # builds it and pushes it to the in-cluster registry; the pod then
-            # pulls the registry-qualified ref. Other per-service images have no
-            # such delivery path (see build_images).
-            web = (self.m.get("images", {}) or {}).get("web")
-            if web:
-                staged = self._stage_web_build_from(web)
-                info("Delivering the derived web image to k8s via "
-                     "canasta create --build-from")
-                cmd += ["--build-from", str(staged)]
-                # An overlay must layer on the FULL canasta image. Under
-                # --build-from the CLI otherwise defaults BASE_IMAGE to
-                # canasta-base (no bundled extensions), so always pass an
-                # explicit base: the resolved one (CLI --base-image or manifest
-                # baseImage), else the Canasta image for the targeted version.
-                base = self._base_image_for("web", web) or default_canasta_image()
-                cmd += ["--build-arg", f"BASE_IMAGE={base}"]
-            elif self.base_image:
-                # No web overlay: run the custom image directly. The cluster
-                # must be able to pull it, so a local-only tag is rejected
-                # (it would only produce an ImagePullBackOff on the pod).
-                if not is_registry_qualified(self.base_image):
-                    raise BuildError(
-                        f"--base-image '{self.base_image}' is a local-only tag; "
-                        "a Kubernetes cluster can't pull it. Push it to a "
-                        "registry the cluster can reach and pass the "
-                        "registry-qualified ref, or add a web image overlay "
-                        "(built and pushed to the in-cluster registry via "
-                        "--build-from).")
-                cmd += ["--canasta-image", self.base_image]
-        elif images.get("web"):
-            cmd += ["--canasta-image", images["web"]]
+        # Hand the web overlay's build context to `canasta create
+        # --build-from`. The CLI builds it under its own image name (pushed
+        # to the in-cluster registry on k8s), records the tree and build
+        # args, and rebuilds from them on every `canasta upgrade`. Other
+        # per-service images have no such delivery path (see build_images).
+        web = (self.m.get("images", {}) or {}).get("web")
+        if web:
+            staged = self._stage_web_build_from(web)
+            info("Delivering the derived web image via "
+                 "canasta create --build-from")
+            cmd += ["--build-from", str(staged)]
+            # An overlay must layer on the FULL canasta image. Under
+            # --build-from the CLI otherwise defaults BASE_IMAGE to
+            # canasta-base (no bundled extensions), so always pass an
+            # explicit base: the resolved one (CLI --base-image or manifest
+            # baseImage), else the Canasta image for the targeted version.
+            base = self._base_image_for("web", web) or default_canasta_image()
+            cmd += ["--build-arg", f"BASE_IMAGE={base}"]
         elif self.base_image:
-            # No web overlay on Compose: run the custom image directly. A local
-            # tag is fine here — Compose uses the local Docker daemon.
+            # No web overlay: run the custom image directly. A k8s cluster
+            # must be able to pull it, so a local-only tag is rejected there
+            # (it would only produce an ImagePullBackOff on the pod); Compose
+            # uses the local Docker daemon, so any tag works.
+            if self.is_k8s and not is_registry_qualified(self.base_image):
+                raise BuildError(
+                    f"--base-image '{self.base_image}' is a local-only tag; "
+                    "a Kubernetes cluster can't pull it. Push it to a "
+                    "registry the cluster can reach and pass the "
+                    "registry-qualified ref, or add a web image overlay "
+                    "(built and pushed to the in-cluster registry via "
+                    "--build-from).")
             cmd += ["--canasta-image", self.base_image]
         run(cmd, dry_run=self.dry_run)
 
@@ -1507,6 +1532,19 @@ def normalize_template_name(name) -> str:
     return s
 
 
+def canasta_cli_version() -> str | None:
+    """The installed canasta CLI's own version (X.Y.Z), read from the first
+    line of `canasta version`, or None if it cannot be read."""
+    try:
+        result = run(["canasta", "version"], dry_run=False, capture=True,
+                     check=False)
+    except OSError:
+        return None
+    out = (result.stdout or "") + (result.stderr or "")
+    vm = re.search(r"Canasta CLI v?(\d+\.\d+\.\d+)", out)
+    return vm.group(1) if vm else None
+
+
 def target_canasta_version() -> str | None:
     """The Canasta version the installed canasta CLI targets, read from the
     "Target Canasta version" line of `canasta version`, or None if that line
@@ -1756,6 +1794,7 @@ class Upgrade(Deploy):
         elif not supplied:
             warn(f"instance '{self.id}' is not in this host's canasta "
                  f"registry; assuming {self.orchestrator} — pass -o if wrong")
+        self.web_build_from = self._has_wicker_build_from()
         self.skip_backup = getattr(args, "skip_backup", False)
         self.report_only = getattr(args, "report_only", False)
         self.baseline = getattr(args, "baseline", None)
@@ -1765,6 +1804,23 @@ class Upgrade(Deploy):
         self.old_manifest: dict = {}
         self.base_pages: dict = {}
         self.migrations: list = []
+
+    def _has_wicker_build_from(self) -> bool:
+        """Whether the canasta registry records the instance as built from
+        the tree Wicker stages. An instance with no recorded tree keeps
+        Wicker's own web image; one built from any other tree is refused,
+        since restaging would not change what the CLI rebuilds."""
+        recorded = (getattr(self, "_registry_record", None)
+                    or {}).get("buildFrom")
+        if not recorded or not (self.m.get("images") or {}).get("web"):
+            return False
+        ours = self._build_from_root()
+        if Path(recorded).expanduser().resolve() != ours.resolve():
+            raise BuildError(
+                f"instance '{self.id}' is built from {recorded} per the "
+                f"canasta registry, not from Wicker's tree at {ours}; "
+                f"wicker upgrade cannot update its web image")
+        return True
 
     @property
     def legacy_state_dir(self) -> Path:
@@ -1860,6 +1916,7 @@ class Upgrade(Deploy):
         constraint = (self.m.get("requires") or {}).get("canasta")
         if constraint:
             check_canasta_requirement(constraint)
+        self.check_cli_for_build_from()
         self.validate_secrets()
         if not self.instance_dir.is_dir():
             raise BuildError(
@@ -1971,6 +2028,7 @@ class Upgrade(Deploy):
             # Stage public assets before the restart so the k8s PVC sync picks
             # them up (see run_pipeline).
             self.install_public_assets()
+            self.rebuild_web_image()
             self.canasta_restart()
             if not self.is_k8s:
                 self.wait_healthy()
@@ -2005,22 +2063,23 @@ class Upgrade(Deploy):
     # ---- code & config sync --------------------------------------------- #
 
     def apply_images(self, images: dict) -> None:
-        """Point the instance at the rebuilt web image via a config set the
-        pipeline's restart picks up — the local tag on Compose, or a fresh
-        `canasta image push` of the overlay context on k8s (create used
-        --build-from; upgrade re-pushes to the same in-cluster registry)."""
-        if self.is_k8s:
-            web = (self.m.get("images", {}) or {}).get("web")
-            if web:
-                tag = self._push_image_k8s("web", web)
-                # `canasta upgrade` rebuilds the web image from the tree
-                # deploy recorded as --build-from. Re-stage it so that
-                # rebuild reproduces this app version rather than the one
-                # first deployed. Only for instances that have such a tree;
-                # never mint one the canasta registry does not point at.
-                if self._build_from_root().is_dir():
-                    self._stage_web_build_from(web)
-            elif self.base_image:
+        """Point the instance at a web image Wicker delivers itself, via a
+        config set the pipeline's restart picks up. A web overlay built from
+        Wicker's --build-from tree is left to rebuild_web_image; one without
+        such a tree is built as the local tag on Compose, or pushed with
+        `canasta image push` on k8s."""
+        web = (self.m.get("images", {}) or {}).get("web")
+        if web and self.web_build_from:
+            tag = None
+        elif web:
+            warn(f"instance '{self.id}' has no --build-from tree in the "
+                 f"canasta registry, so `canasta upgrade` does not rebuild "
+                 f"its web image; Wicker builds its own and points "
+                 f"CANASTA_IMAGE at it")
+            tag = (self._push_image_k8s("web", web) if self.is_k8s
+                   else images.get("web"))
+        elif self.is_k8s:
+            if self.base_image:
                 # No web overlay: run the custom image directly. Same rule
                 # as deploy — the cluster must be able to pull it.
                 if not is_registry_qualified(self.base_image):
@@ -2040,6 +2099,28 @@ class Upgrade(Deploy):
                  "--no-restart", f"CANASTA_IMAGE={tag}"],
                 dry_run=self.dry_run)
         self.install_elasticsearch_image(images)
+
+    def rebuild_web_image(self) -> None:
+        """Rebuild a web overlay built from Wicker's --build-from tree: stage
+        this app version's context into the tree, then have the CLI rebuild
+        from it with `canasta image set-build-arg`, under the image name the
+        instance runs and `canasta upgrade` rebuilds. The CLI restarts the
+        instance when the image changed. With --skip-build the base is only
+        recorded, and the next `canasta upgrade` rebuilds."""
+        web = (self.m.get("images", {}) or {}).get("web")
+        if not (web and self.web_build_from):
+            return
+        self._stage_web_build_from(web)
+        base = self._base_image_for("web", web) or default_canasta_image()
+        cmd = ["canasta", "image", "set-build-arg", "-i", self.id,
+               f"BASE_IMAGE={base}"]
+        if self.skip_build:
+            info("Skipping the web image rebuild (--skip-build); the next "
+                 "`canasta upgrade` rebuilds it")
+            cmd.append("--no-rebuild")
+        else:
+            info(f"Rebuilding the web image from {self._build_from_root()}")
+        run(cmd, dry_run=self.dry_run)
 
     def remove_old_sidecars(self) -> None:
         """Withdraw every sidecar the old manifest declared so

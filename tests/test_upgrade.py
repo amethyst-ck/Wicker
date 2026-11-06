@@ -778,7 +778,8 @@ class TestUpgradePipelineShape:
         "install_secrets", "remove_old_sidecars", "install_sidecars",
         "install_web_env_bridge", "prune_components", "install_extensions",
         "install_skins", "prune_settings", "install_settings",
-        "install_public_assets", "canasta_restart", "wait_healthy",
+        "install_public_assets", "rebuild_web_image", "canasta_restart",
+        "wait_healthy",
         "add_new_wikis", "apply_content", "run_migrations", "record_state",
         "print_report", "print_migration_results", "print_sync_plan",
         "print_migration_preview", "plan_content",
@@ -805,6 +806,10 @@ class TestUpgradePipelineShape:
     def test_full_upgrade_ordering(self, tmp_path):
         calls = self._recorded(tmp_path, report_only=False)
         assert calls.index("install_public_assets") < calls.index("canasta_restart")
+        # The CLI's rebuild restarts onto the new image, so it runs after the
+        # config changes and before the restart that applies them.
+        assert (calls.index("install_settings") < calls.index("rebuild_web_image")
+                < calls.index("canasta_restart"))
         assert calls.index("prune_settings") < calls.index("install_settings")
         assert calls.index("backup") < calls.index("build_images")
         assert calls[0] == "preflight_upgrade"
