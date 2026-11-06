@@ -145,6 +145,10 @@ Flags:
   argument (see `images/README.md` in a scaffolded app); without one it
   is passed to `canasta create --canasta-image`. On k8s the ref must be
   registry-reachable, not a local-only tag.
+- `--staging-certs`: passed to `canasta create`, which then uses the Let's
+  Encrypt staging CA. Its certificates are untrusted by browsers and do
+  not count against Let's Encrypt's production rate limits, which suits a
+  test deploy that is created and deleted often.
 - `--dry-run`: print the steps without executing them.
 - Kubernetes pass-throughs to `canasta create`: `--storage-class`,
   `--access-mode`, `--ingress-class`, `--skip-tls`.
