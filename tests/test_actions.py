@@ -106,3 +106,29 @@ class TestInstallContent:
                         files=[("There.mediawiki", "x")])
         assert "missing source for Main Page" in cap.err
         assert "-> There" in cap.out
+
+
+class TestCanastaExecArgv:
+    """`canasta maintenance exec` runs what follows `--` as the argv, with
+    no shell, so each word must arrive as its own argument."""
+
+    def _calls(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(wicker, "run",
+                            lambda cmd, **kw: calls.append(list(cmd)))
+        return calls
+
+    def test_command_is_split_into_arguments(self, tmp_path, monkeypatch):
+        calls = self._calls(monkeypatch)
+        _deploy(tmp_path)._canasta_exec("php run.php update --quick")
+        assert calls == [["canasta", "maintenance", "exec", "-i", "t", "--",
+                          "php", "run.php", "update", "--quick"]]
+
+    def test_quoted_title_stays_one_argument(self, tmp_path, monkeypatch):
+        calls = self._calls(monkeypatch)
+        src = tmp_path / "page.txt"
+        src.write_text("text")
+        _deploy(tmp_path)._mw_edit("Main Page", src, summary="Two words")
+        argv = calls[0][calls[0].index("--") + 1:]
+        assert argv[-1] == "Main Page"
+        assert "--summary=Two words" in argv
