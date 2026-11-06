@@ -1297,18 +1297,18 @@ class Deploy:
         """Run a command in a container via `canasta maintenance exec` — not raw
         docker — so the builder works against local, remote, and K8s targets,
         and against any service (the web container by default, or a sidecar via
-        `service`). `canasta maintenance exec` shlex-splits the command string
-        and exec's the resulting argv directly (no shell), so callers needing
-        shell semantics must pass an explicit `sh -c …`, and tokens containing
-        spaces must be shlex-quoted (see _mw_edit). `capture` and `check` pass
-        through to run(), whose result is returned for callers that read
-        output or inspect the returncode."""
+        `service`). `command` is shlex-split here and passed after `--` as
+        separate arguments, which `canasta maintenance exec` exec's directly
+        (no shell). Callers needing shell semantics must pass an explicit
+        `sh -c …`, and tokens containing spaces must be shlex-quoted (see
+        _mw_edit). `capture` and `check` pass through to run(), whose result
+        is returned for callers that read output or inspect the returncode."""
         cmd = ["canasta", "maintenance", "exec", "-i", self.id]
         if service is not None:
             cmd += ["--service", service]
         if stdin_path is not None:
             cmd += ["--stdin-file", str(stdin_path)]
-        cmd += ["--", command]
+        cmd += ["--", *shlex.split(command)]
         return run(cmd, dry_run=self.dry_run, capture=capture, check=check)
 
     def _mw_edit(self, page_name: str, src: Path,
