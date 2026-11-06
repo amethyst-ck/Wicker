@@ -198,29 +198,32 @@ would run, and writes nothing — run it first. Migration steps are
 idempotent (a rename already applied finds nothing to do), so an
 interrupted upgrade can simply be re-run.
 
-## Multiple applications on one cluster
+## Multiple applications on one host or cluster
 
-Wicker is one instance per application, but a single Canasta
-**Kubernetes** cluster — even a single node — can host many apps. Each
-`wicker deploy` creates its own Canasta instance in its own namespace;
-the apps share the cluster's infra (ingress controller, cert-manager,
-Argo CD, image registry). Give each app a distinct `-i` (id) and a
-distinct `-n` domain:
+Wicker is one instance per application, but a single Docker Compose
+host or Canasta Kubernetes cluster (even a single node) can host many
+apps. Each `wicker deploy` creates its own Canasta instance. Give each
+app a distinct `-i` (id) and a distinct `-n` domain:
 
 ```bash
-./wicker deploy <appA> -i appa -n appa.example.com -p <path> -o kubernetes …
-./wicker deploy <appB> -i appb -n appb.example.com -p <path> -o kubernetes …
+./wicker deploy <appA> -i appa -n appa.example.com -p <path> …
+./wicker deploy <appB> -i appb -n appb.example.com -p <path> …
 ```
 
-The **domain is the differentiator** — Canasta's k8s Ingress routes
-purely by host. Paths separate *wikis within one app's farm*
-(`example.com/wikiA` vs `/wikiB` inside a single instance), not separate
-apps — two apps can't share a hostname distinguished only by path.
+This works the same way on both orchestrators, because both serve every
+instance on `:80`/`:443` and route by hostname, with a certificate per
+hostname:
 
-This is where k8s beats Compose for co-hosting: the shared ingress fronts
-every app on `:80`/`:443` and routes by hostname. With Compose each
-instance binds the host ports directly, so co-hosted instances would need
-distinct `HTTP_PORT`/`HTTPS_PORT`.
+- **Docker Compose**: the host-wide HAProxy edge fronts every instance
+  on the host.
+- **Kubernetes** (`-o kubernetes`): each instance runs in its own
+  namespace, and the apps share the cluster's infrastructure (ingress
+  controller, cert-manager, Argo CD, image registry).
+
+The **domain is the differentiator**. Paths separate *wikis within one
+app's farm* (`example.com/wikiA` vs `/wikiB` inside a single instance),
+not separate apps: two apps can't share a hostname distinguished only by
+path.
 
 ## Status
 
