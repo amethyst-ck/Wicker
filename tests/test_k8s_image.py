@@ -1,15 +1,18 @@
 """Tests for derived web-image delivery across orchestrators.
 
-On Compose the web image is built locally and passed via `--canasta-image`.
-On k8s a controller-local tag is unpullable by the cluster, so the web image's
-context is staged as a `canasta create --build-from` source tree and Canasta
-builds + pushes it to the in-cluster registry instead.
+On both orchestrators the web image's context is staged as a `canasta create
+--build-from` source tree. Canasta builds it under its own image name (and
+pushes it to the in-cluster registry on k8s), and rebuilds it from that tree
+on `canasta upgrade` and `canasta image set-build-arg`.
 """
+
+import json
 
 import pytest
 
 from conftest import (TEST_CANASTA_IMAGE, make_deploy, make_upgrade,
-                      minimal_manifest, real_default_canasta_image)
+                      minimal_manifest, real_canasta_cli_version,
+                      real_default_canasta_image)
 import wicker
 
 
@@ -26,12 +29,23 @@ class TestCanastaCreateImageFlags:
         assert "--build-from" in out
         assert "--canasta-image" not in out
 
-    def test_compose_web_image_uses_canasta_image(self, tmp_path, capsys):
+    def test_compose_web_image_uses_build_from(self, tmp_path, capsys):
         d = _deploy(tmp_path, "compose", {"web": {"dockerfile": "./Dockerfile"}})
-        d.canasta_create(images={"web": "myimg:local"})
+        d.canasta_create(images={})
         out = capsys.readouterr().out
-        assert "--canasta-image myimg:local" in out
-        assert "--build-from" not in out
+        assert "--build-from" in out
+        assert "--canasta-image" not in out
+
+    def test_compose_deploy_does_not_build_web_itself(self, tmp_path, capsys):
+        d = _deploy(tmp_path, "compose", {"web": {"dockerfile": "./Dockerfile"}})
+        assert d.build_images() == {}
+        assert "docker build" not in capsys.readouterr().out
+
+    def test_compose_base_image_without_overlay_runs_it(self, tmp_path, capsys):
+        d = make_deploy(tmp_path, minimal_manifest(), orchestrator="compose",
+                        base_image="myimg:local")
+        d.canasta_create(images={})
+        assert "--canasta-image myimg:local" in capsys.readouterr().out
 
     def test_k8s_without_web_image_passes_neither(self, tmp_path, capsys):
         d = _deploy(tmp_path, "k8s", {})
@@ -255,7 +269,7 @@ class TestBaseImageOverride:
     def test_compose_cli_flag_forwards_build_arg(self, tmp_path, capsys):
         d = self._web(tmp_path, "compose", {"dockerfile": "./Dockerfile"},
                       base_image="canasta:local")
-        d.build_images()
+        d.canasta_create(images={})
         assert "--build-arg BASE_IMAGE=canasta:local" in capsys.readouterr().out
 
     def test_k8s_cli_flag_forwards_build_arg(self, tmp_path, capsys):
@@ -269,7 +283,7 @@ class TestBaseImageOverride:
     def test_manifest_base_image_used_without_cli_flag(self, tmp_path, capsys):
         d = self._web(tmp_path, "compose",
                       {"dockerfile": "./Dockerfile", "baseImage": "canasta:manifest"})
-        d.build_images()
+        d.canasta_create(images={})
         assert "--build-arg BASE_IMAGE=canasta:manifest" in capsys.readouterr().out
 
     def test_cli_flag_overrides_manifest_base_image(self, tmp_path, capsys):
@@ -277,17 +291,29 @@ class TestBaseImageOverride:
                       {"dockerfile": "./Dockerfile", "baseImage": "canasta:manifest"},
                       base_image="canasta:cli")
         out = capsys.readouterr().out  # drain
-        d.build_images()
+        d.canasta_create(images={})
         out = capsys.readouterr().out
         assert "--build-arg BASE_IMAGE=canasta:cli" in out
         assert "canasta:manifest" not in out
 
-    def test_no_base_image_means_no_build_arg(self, tmp_path, capsys):
-        # Compose builds the overlay locally, so an omitted base lets the
-        # Dockerfile's own `ARG BASE_IMAGE` default apply — no build-arg needed.
+    def test_compose_overlay_defaults_base_to_targeted_release(self, tmp_path,
+                                                                capsys):
         d = self._web(tmp_path, "compose", {"dockerfile": "./Dockerfile"})
-        d.build_images()
-        assert "BASE_IMAGE" not in capsys.readouterr().out
+        d.canasta_create(images={})
+        assert (f"--build-arg BASE_IMAGE={TEST_CANASTA_IMAGE}"
+                in capsys.readouterr().out)
+
+    def test_elasticsearch_still_built_locally_on_compose(self, tmp_path,
+                                                          capsys):
+        d = make_deploy(tmp_path, minimal_manifest(images={
+            "elasticsearch": {"dockerfile": "./Dockerfile",
+                              "baseImage": "es:base"}}),
+            orchestrator="compose")
+        assert d.build_images() == {
+            "elasticsearch": "app-elasticsearch:0.1.0"}
+        out = capsys.readouterr().out
+        assert "docker build" in out
+        assert "--build-arg BASE_IMAGE=es:base" in out
 
     def test_k8s_overlay_defaults_base_to_full_canasta_image(self, tmp_path, capsys):
         # On k8s the overlay is built via `canasta create --build-from`, whose
@@ -354,27 +380,170 @@ class TestIsRegistryQualified:
         assert wicker.is_registry_qualified("localhost:5000/canasta:local")
 
 
-class TestUpgradeRestagesBuildFrom:
-    """The canasta registry keeps pointing at the tree deploy staged, and
-    `canasta upgrade` rebuilds the web image from it. Upgrade must refresh
-    it, or that rebuild resurrects the app version first deployed."""
+def _register(monkeypatch, tmp_path, *, orchestrator, build_from=None,
+              id="app"):
+    """Write a canasta registry recording instance `id` at tmp_path/<id>,
+    built from `build_from` when given."""
+    conf_dir = tmp_path / "canasta-conf"
+    conf_dir.mkdir(exist_ok=True)
+    record = {"id": id, "path": str(tmp_path / id),
+              "orchestrator": orchestrator, "host": "localhost"}
+    if build_from:
+        record["buildFrom"] = str(build_from)
+    (conf_dir / "conf.json").write_text(
+        json.dumps({"Instances": {id: record}}))
+    monkeypatch.setenv("CANASTA_CONFIG_DIR", str(conf_dir))
 
-    def _upgrade(self, tmp_path):
+
+def _build_from_root(id="app"):
+    import os
+    from pathlib import Path
+    return Path(os.environ["XDG_STATE_HOME"]) / "wicker" / "build-from" / id
+
+
+@pytest.mark.parametrize("orchestrator", ["compose", "kubernetes"])
+class TestUpgradeRebuildsFromBuildFrom:
+    """An instance built from Wicker's --build-from tree runs the image the
+    CLI builds from it. Upgrade restages the tree and has the CLI rebuild
+    under that name, so `canasta upgrade` and the instance agree on one web
+    image."""
+
+    def _upgrade(self, tmp_path, monkeypatch, orchestrator, spec=None,
+                 **kw):
+        _register(monkeypatch, tmp_path, orchestrator=orchestrator,
+                  build_from=_build_from_root())
+        m = minimal_manifest(images={"web": spec or
+                                     {"dockerfile": "./Dockerfile"}})
+        (tmp_path / "Dockerfile").write_text("ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n")
+        return make_upgrade(tmp_path, m, id="app", path=None,
+                            orchestrator=None, **kw)
+
+    def test_apply_images_leaves_the_web_image_to_the_cli(
+            self, tmp_path, monkeypatch, capsys, orchestrator):
+        u = self._upgrade(tmp_path, monkeypatch, orchestrator)
+        assert u.build_images() == {}
+        u.apply_images({})
+        out = capsys.readouterr().out
+        assert "CANASTA_IMAGE=" not in out
+        assert "image push" not in out
+        assert "docker build" not in out
+
+    def test_rebuild_restages_and_sets_the_base(
+            self, tmp_path, monkeypatch, capsys, orchestrator):
+        u = self._upgrade(tmp_path, monkeypatch, orchestrator, dry_run=False)
+        calls = []
+        monkeypatch.setattr(wicker, "run",
+                            lambda cmd, **kw: calls.append(list(cmd)))
+        u.rebuild_web_image()
+        assert (_build_from_root() / "Canasta" / "Dockerfile").is_file()
+        assert calls == [["canasta", "image", "set-build-arg", "-i", "app",
+                          f"BASE_IMAGE={TEST_CANASTA_IMAGE}"]]
+
+    def test_rebuild_uses_the_manifest_base(
+            self, tmp_path, monkeypatch, capsys, orchestrator):
+        u = self._upgrade(tmp_path, monkeypatch, orchestrator,
+                          spec={"dockerfile": "./Dockerfile",
+                                "baseImage": "canasta:manifest"})
+        u.rebuild_web_image()
+        out = capsys.readouterr().out
+        assert "set-build-arg -i app BASE_IMAGE=canasta:manifest" in out
+
+    def test_skip_build_records_without_rebuilding(
+            self, tmp_path, monkeypatch, capsys, orchestrator):
+        u = self._upgrade(tmp_path, monkeypatch, orchestrator,
+                          skip_build=True)
+        u.rebuild_web_image()
+        assert "--no-rebuild" in capsys.readouterr().out
+
+    def test_other_build_from_tree_is_refused(
+            self, tmp_path, monkeypatch, orchestrator):
+        _register(monkeypatch, tmp_path, orchestrator=orchestrator,
+                  build_from=tmp_path / "elsewhere")
         m = minimal_manifest(images={"web": {"dockerfile": "./Dockerfile"}})
-        return make_upgrade(tmp_path, m, id="app", orchestrator="k8s")
+        with pytest.raises(wicker.BuildError, match="not from Wicker's tree"):
+            make_upgrade(tmp_path, m, id="app", path=None, orchestrator=None)
 
-    def test_restages_when_a_build_from_tree_exists(self, tmp_path, capsys):
-        u = self._upgrade(tmp_path)
-        (u._build_from_root() / "Canasta").mkdir(parents=True)
-        u.apply_images({})
-        assert "Staging web build context for --build-from" in capsys.readouterr().out
 
-    def test_no_tree_is_left_alone(self, tmp_path, capsys):
-        u = self._upgrade(tmp_path)
-        assert not u._build_from_root().exists()
-        u.apply_images({})
-        assert "Staging web build context for --build-from" not in capsys.readouterr().out
-        assert not u._build_from_root().exists()
+def test_other_build_from_tree_without_overlay_is_left_alone(tmp_path,
+                                                            monkeypatch):
+    _register(monkeypatch, tmp_path, orchestrator="compose",
+              build_from=tmp_path / "elsewhere")
+    u = make_upgrade(tmp_path, minimal_manifest(), id="app", path=None,
+                     orchestrator=None)
+    assert u.web_build_from is False
+
+
+class TestUpgradeWithoutBuildFrom:
+    """An instance with no recorded --build-from tree keeps the web image
+    Wicker builds itself, with a warning that `canasta upgrade` does not
+    rebuild it."""
+
+    def _upgrade(self, tmp_path, monkeypatch, orchestrator):
+        _register(monkeypatch, tmp_path, orchestrator=orchestrator)
+        m = minimal_manifest(images={"web": {"dockerfile": "./Dockerfile"}})
+        return make_upgrade(tmp_path, m, id="app", path=None,
+                            orchestrator=None)
+
+    def test_compose_builds_and_points_canasta_image(
+            self, tmp_path, monkeypatch, capsys):
+        u = self._upgrade(tmp_path, monkeypatch, "compose")
+        images = u.build_images()
+        assert images == {"web": "app-web:0.1.0"}
+        u.apply_images(images)
+        u.rebuild_web_image()
+        captured = capsys.readouterr()
+        assert "docker build -t app-web:0.1.0" in captured.out
+        assert "CANASTA_IMAGE=app-web:0.1.0" in captured.out
+        assert "set-build-arg" not in captured.out
+        assert "no --build-from tree" in captured.err
+
+    def test_k8s_pushes_and_points_canasta_image(
+            self, tmp_path, monkeypatch, capsys):
+        u = self._upgrade(tmp_path, monkeypatch, "kubernetes")
+        u.apply_images(u.build_images())
+        u.rebuild_web_image()
+        out = capsys.readouterr().out
+        assert "canasta image push" in out
+        assert "CANASTA_IMAGE=10.43.0.2:5000/app-web:0.1.0" in out
+        assert "set-build-arg" not in out
+        assert not _build_from_root().exists()
+
+
+class TestCliVersionForBuildFrom:
+    def _deploy(self, tmp_path, images):
+        return make_deploy(tmp_path, minimal_manifest(images=images))
+
+    def test_old_cli_is_refused(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(wicker, "canasta_cli_version", lambda: "4.26.6")
+        d = self._deploy(tmp_path, {"web": {"dockerfile": "./Dockerfile"}})
+        with pytest.raises(wicker.BuildError, match=">= 4.27.0"):
+            d.check_cli_for_build_from()
+
+    def test_current_cli_passes(self, tmp_path):
+        self._deploy(tmp_path, {"web": {"dockerfile": "./Dockerfile"}}) \
+            .check_cli_for_build_from()
+
+    def test_unreadable_version_warns(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(wicker, "canasta_cli_version", lambda: None)
+        self._deploy(tmp_path, {"web": {"dockerfile": "./Dockerfile"}}) \
+            .check_cli_for_build_from()
+        assert "WARN" in capsys.readouterr().err
+
+    def test_no_overlay_is_not_checked(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(wicker, "canasta_cli_version", lambda: "4.0.0")
+        self._deploy(tmp_path, {}).check_cli_for_build_from()
+
+    @pytest.mark.parametrize("out,want", [
+        ("Canasta CLI v4.30.0 (native, commit abc)\n", "4.30.0"),
+        ("Canasta CLI 5.0.0 (native)\n", "5.0.0"),
+        ("something else\n", None),
+    ])
+    def test_reads_the_cli_version(self, monkeypatch, out, want):
+        class R:
+            stdout = out
+            stderr = ""
+        monkeypatch.setattr(wicker, "run", lambda *a, **k: R())
+        assert real_canasta_cli_version() == want
 
 
 class TestOverlayBaseFollowsCanastaVersion:

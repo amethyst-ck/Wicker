@@ -240,7 +240,7 @@
         },
         "tag": {
           "type": "string",
-          "description": "Image tag (default derived from app name + service + version)."
+          "description": "Image tag (default derived from app name + service + version). The web image is built by Canasta under its own name, so this applies to web only on an instance created without --build-from."
         },
         "baseImage": {
           "type": "string",

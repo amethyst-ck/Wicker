@@ -108,3 +108,16 @@ def _pinned_overlay_base(monkeypatch):
     on the host."""
     monkeypatch.setattr(wicker, "default_canasta_image",
                         lambda: TEST_CANASTA_IMAGE)
+
+
+# The canasta CLI version tests run against, and the unpinned reader.
+TEST_CLI_VERSION = "4.30.0"
+real_canasta_cli_version = wicker.canasta_cli_version
+
+
+@pytest.fixture(autouse=True)
+def _pinned_cli_version(monkeypatch):
+    """Report TEST_CLI_VERSION as the installed canasta CLI instead of
+    asking the host's."""
+    monkeypatch.setattr(wicker, "canasta_cli_version",
+                        lambda: TEST_CLI_VERSION)
