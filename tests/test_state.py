@@ -1,4 +1,4 @@
-"""Tests for deploy-time state recording (.wicker-app/).
+"""Tests for deploy-time state recording (config/wicker-app/).
 
 record_state writes state.json (app, version, manifest hash, per-page content
 hashes, history), a verbatim copy of the applied manifest, and a snapshot of
@@ -48,7 +48,7 @@ class TestRecordState:
     def test_state_json_contents(self, tmp_path):
         _write_app(tmp_path, MANIFEST, PAGES)
         _deploy(tmp_path, MANIFEST).record_state()
-        state = json.loads((tmp_path / "t" / ".wicker-app" / "state.json")
+        state = json.loads((tmp_path / "t" / "config" / "wicker-app" / "state.json")
                            .read_text())
         assert state["app"] == "app"
         assert state["version"] == "1.0.0"
@@ -69,7 +69,7 @@ class TestRecordState:
     def test_manifest_copied_verbatim(self, tmp_path):
         _write_app(tmp_path, MANIFEST, PAGES)
         _deploy(tmp_path, MANIFEST).record_state()
-        copy = tmp_path / "t" / ".wicker-app" / "manifest.yaml"
+        copy = tmp_path / "t" / "config" / "wicker-app" / "manifest.yaml"
         assert copy.read_bytes() == (tmp_path / "wicker.yaml").read_bytes()
 
     def test_snapshot_uses_derived_names(self, tmp_path):
@@ -77,7 +77,7 @@ class TestRecordState:
         # name, so upgrade can look pages up by title alone.
         _write_app(tmp_path, MANIFEST, PAGES)
         _deploy(tmp_path, MANIFEST).record_state()
-        content = tmp_path / "t" / ".wicker-app" / "content"
+        content = tmp_path / "t" / "config" / "wicker-app" / "content"
         assert (content / "Template/Expense.mediawiki").read_text() == \
             PAGES["Template/Expense.mediawiki"]
         assert (content / "Main Page.mediawiki").read_text() == \
@@ -91,7 +91,7 @@ class TestRecordState:
         del pages["Main Page.mediawiki"]
         _write_app(tmp_path, MANIFEST, pages)
         _deploy(tmp_path, MANIFEST).record_state()
-        state = json.loads((tmp_path / "t" / ".wicker-app" / "state.json")
+        state = json.loads((tmp_path / "t" / "config" / "wicker-app" / "state.json")
                            .read_text())
         assert "Main Page" not in state["pages"]
         assert "Template:Expense" in state["pages"]
@@ -100,15 +100,15 @@ class TestRecordState:
         manifest = minimal_manifest(version="1.0.0")
         _write_app(tmp_path, manifest)
         _deploy(tmp_path, manifest).record_state()
-        state = json.loads((tmp_path / "t" / ".wicker-app" / "state.json")
+        state = json.loads((tmp_path / "t" / "config" / "wicker-app" / "state.json")
                            .read_text())
         assert state["pages"] == {}
 
     def test_dry_run_writes_nothing(self, tmp_path, capsys):
         _write_app(tmp_path, MANIFEST, PAGES)
         _deploy(tmp_path, MANIFEST, dry_run=True).record_state()
-        assert not (tmp_path / "t" / ".wicker-app").exists()
-        assert ".wicker-app" in capsys.readouterr().out
+        assert not (tmp_path / "t" / "config" / "wicker-app").exists()
+        assert "config/wicker-app" in capsys.readouterr().out
 
     def test_rerecord_appends_history_and_prunes_snapshot(self, tmp_path):
         _write_app(tmp_path, MANIFEST, PAGES)
@@ -120,7 +120,7 @@ class TestRecordState:
                                "list": ["Template:Expense"]}})
         (tmp_path / "wicker.yaml").write_text(yaml.safe_dump(m2))
         _deploy(tmp_path, m2).record_state()
-        app_state = tmp_path / "t" / ".wicker-app"
+        app_state = tmp_path / "t" / "config" / "wicker-app"
         state = json.loads((app_state / "state.json").read_text())
         assert state["version"] == "1.1.0"
         assert [h["version"] for h in state["history"]] == ["1.0.0", "1.1.0"]

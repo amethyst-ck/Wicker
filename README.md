@@ -34,9 +34,10 @@ app onto it:
    fragments, and public assets, then restart.
 4. Add the remaining farm wikis, import the starter pages and media, and
    run the `postInstall` actions.
-5. Record the app state in `<instance>/.wicker-app/` — the baseline a
-   later `wicker upgrade` compares shipped pages against. It lives in the
-   instance directory, so backups capture it too.
+5. Record the app state in `<instance>/config/wicker-app/` — the
+   baseline a later `wicker upgrade` compares shipped pages against. It
+   lives under `config/`, so `canasta backup` captures it, a restore
+   brings it back, and gitops tracks it.
 
 Domains are supplied at deploy time, not in the manifest: one per wiki,
 comma-separated, in manifest order. The primary (first) wiki takes a
@@ -163,8 +164,11 @@ under a limited, explicit contract — deterministic changes are applied,
 anything ambiguous is reported and left alone:
 
 1. **Preflight**: same app, strictly higher version, primary wiki
-   unchanged, instance state present (`.wicker-app/`, recorded at
-   deploy). An instance deployed before state recording existed needs
+   unchanged, instance state present (`config/wicker-app/`, recorded at
+   deploy). State in an instance's top-level `.wicker-app/` directory,
+   outside what backups capture, is read from there and moved to
+   `config/wicker-app/` after the backup.
+   An instance deployed before state recording existed needs
    `--baseline <old-app-checkout>` once, to reconstruct the state.
 2. **Backup**: `canasta backup create --tag pre-upgrade-<version>` (opt
    out with `--skip-backup`; the backup repo must be initialized).
@@ -176,7 +180,7 @@ anything ambiguous is reported and left alone:
 4. **Shipped-page reconciliation**, per page: pristine pages (live text
    == what the old version shipped) are overwritten or deleted to match
    the new version; user-modified pages get a three-way merge — clean
-   merges are saved, conflicts are written to `.wicker-app/conflicts/`
+   merges are saved, conflicts are written to `config/wicker-app/conflicts/`
    and reported, never saved to the wiki. Pages the user deleted are not
    resurrected; pages removed from the app but locally modified are not
    deleted.
@@ -189,7 +193,7 @@ anything ambiguous is reported and left alone:
    whose wikitext can't be rewritten safely are reported, never guessed.
    Rebuild derived storage (e.g. Cargo) with a `maintenance` step after
    the rewrites.
-6. **State rewrite + report**: `.wicker-app/` now reflects the new
+6. **State rewrite + report**: `config/wicker-app/` now reflects the new
    version (the next upgrade's base), and every page's disposition is
    printed.
 
