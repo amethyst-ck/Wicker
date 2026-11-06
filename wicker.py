@@ -411,6 +411,8 @@ class Deploy:
                 self.k8s_flags += [flag, val]
         if getattr(args, "skip_tls", False):
             self.k8s_flags.append("--skip-tls")
+        # Let's Encrypt staging CA, on either orchestrator.
+        self.staging_certs = getattr(args, "staging_certs", False)
 
     def rel(self, path: str) -> Path:
         """Resolve a manifest-relative path."""
@@ -725,6 +727,8 @@ class Deploy:
             cmd += ["-t", site_name]
         if self.is_k8s:
             cmd += self.k8s_flags
+        if self.staging_certs:
+            cmd.append("--staging-certs")
         # Hand the web overlay's build context to `canasta create
         # --build-from`. The CLI builds it under its own image name (pushed
         # to the in-cluster registry on k8s), records the tree and build
@@ -2605,6 +2609,9 @@ def main(argv: list[str] | None = None) -> int:
     dep.add_argument("--access-mode", help="k8s PVC access mode (ReadWriteOnce/Many)")
     dep.add_argument("--ingress-class", help="k8s ingress class")
     dep.add_argument("--skip-tls", action="store_true", help="k8s: skip Let's Encrypt TLS")
+    dep.add_argument("--staging-certs", action="store_true",
+                     help="Use the Let's Encrypt staging CA (untrusted by "
+                          "browsers; for test deploys)")
     dep.add_argument("--base-image", metavar="IMAGE",
                      help="Deploy against a custom/unreleased Canasta image. "
                           "With a web image overlay: forwarded as --build-arg "

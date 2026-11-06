@@ -64,6 +64,30 @@ class TestCanastaCreateImageFlags:
         assert "--canasta-image" not in out
 
 
+@pytest.mark.parametrize("orchestrator", ["compose", "k8s"])
+def test_staging_certs_reach_canasta_create(tmp_path, capsys, orchestrator):
+    d = make_deploy(tmp_path, minimal_manifest(), orchestrator=orchestrator)
+    d.staging_certs = True
+    d.canasta_create(images={})
+    assert "--staging-certs" in capsys.readouterr().out
+
+
+def test_no_staging_certs_by_default(tmp_path, capsys):
+    make_deploy(tmp_path, minimal_manifest()).canasta_create(images={})
+    assert "--staging-certs" not in capsys.readouterr().out
+
+
+def test_deploy_cli_accepts_staging_certs(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(wicker.Deploy, "run_pipeline",
+                        lambda self: seen.setdefault("v", self.staging_certs))
+    (tmp_path / "wicker.yaml").write_text(
+        __import__("yaml").safe_dump(minimal_manifest()))
+    wicker.main(["deploy", str(tmp_path), "-i", "t", "-n", "localhost",
+                 "-p", str(tmp_path), "--staging-certs"])
+    assert seen["v"] is True
+
+
 class TestStageWebBuildFrom:
     def test_stages_dockerfile_under_canasta_subdir(self, tmp_path):
         (tmp_path / "Dockerfile").write_text("FROM ghcr.io/canastawiki/canasta:latest\n")
