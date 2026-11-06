@@ -93,3 +93,18 @@ def _preflight_tools_on_path(tmp_path_factory, monkeypatch):
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+# The Canasta release the overlay-base default resolves to in tests.
+TEST_CANASTA_IMAGE = "ghcr.io/canastawiki/canasta:3.5.10"
+# The unpinned resolver, for tests of how it reads `canasta version`.
+real_default_canasta_image = wicker.default_canasta_image
+
+
+@pytest.fixture(autouse=True)
+def _pinned_overlay_base(monkeypatch):
+    """Resolve the web overlay's default base to TEST_CANASTA_IMAGE instead
+    of asking whatever canasta CLI is installed, so results do not depend
+    on the host."""
+    monkeypatch.setattr(wicker, "default_canasta_image",
+                        lambda: TEST_CANASTA_IMAGE)

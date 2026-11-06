@@ -8,7 +8,8 @@ builds + pushes it to the in-cluster registry instead.
 
 import pytest
 
-from conftest import make_deploy, make_upgrade, minimal_manifest
+from conftest import (TEST_CANASTA_IMAGE, make_deploy, make_upgrade,
+                      minimal_manifest, real_default_canasta_image)
 import wicker
 
 
@@ -180,7 +181,7 @@ class TestBuildImagesK8s:
         assert "--name app-web:0.1.0" in out
         # An overlay must layer on the full canasta image, so the resolved
         # base is always passed even when the manifest sets none.
-        assert f"--build-arg BASE_IMAGE={wicker.DEFAULT_CANASTA_IMAGE}" in out
+        assert f"--build-arg BASE_IMAGE={TEST_CANASTA_IMAGE}" in out
         assert "CANASTA_IMAGE=10.43.0.2:5000/app-web:0.1.0" in out
 
     def test_k8s_upgrade_without_web_overlay_sets_no_web_image(self, tmp_path,
@@ -297,7 +298,7 @@ class TestBaseImageOverride:
         d.canasta_create(images={})
         out = capsys.readouterr().out
         assert "--build-from" in out
-        assert f"--build-arg BASE_IMAGE={wicker.DEFAULT_CANASTA_IMAGE}" in out
+        assert f"--build-arg BASE_IMAGE={TEST_CANASTA_IMAGE}" in out
 
 
 class TestBaseImageNoOverlay:
@@ -394,16 +395,18 @@ class TestOverlayBaseFollowsCanastaVersion:
             return R()
 
         monkeypatch.setattr(wicker, "run", fake_run)
+        monkeypatch.setattr(wicker, "default_canasta_image",
+                            real_default_canasta_image)
         return calls
 
     def test_overlay_base_follows_the_targeted_canasta_version(
             self, tmp_path, monkeypatch):
-        calls = self._target(monkeypatch, "Target Canasta version: 3.5.10")
+        calls = self._target(monkeypatch, "Target Canasta version: 3.5.12")
         m = minimal_manifest(images={"web": {"dockerfile": "./Dockerfile"}})
         u = make_upgrade(tmp_path, m, id="app", orchestrator="k8s")
         u.apply_images({})
         push = next(c for c in calls if c[:3] == ["canasta", "image", "push"])
-        assert "BASE_IMAGE=ghcr.io/canastawiki/canasta:3.5.10" in push
+        assert "BASE_IMAGE=ghcr.io/canastawiki/canasta:3.5.12" in push
         assert "BASE_IMAGE=ghcr.io/canastawiki/canasta:latest" not in push
 
     def test_unreadable_version_falls_back_to_latest_with_a_warning(
